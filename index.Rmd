@@ -56,7 +56,7 @@ To construct pseudotime, we provide the function `get_sample_pseudotime`:
 
 * `sample_metadata`: patient-level metadata, including several important variables.
 
-* `sample_name` and `phenotype_name`: the variable name in `sample_metadata` that indicates the sample and phenotype. The default setting of `sample_name` is "Patient" and `phenotype_name` is Phenotype. 
+* `sample_name` and `phenotype_name`: the variable name in `sample_metadata` that indicates the sample and phenotype. The default setting of `sample_name` is "Patient" and `phenotype_name` is "Phenotype". 
 
 * `method`: users now have two options, either using TSCAN for sample-level pseudotime construction or use CCA for optimal severity axis detection. 
 
@@ -249,7 +249,13 @@ sample_info_opt = readRDS("./data/sample_info_pb_opt.rds")
 
 Then we provide the following function `get_cell_prop_traj` to visualize the cell proportion change along pseudotime. 
 
-* `cell_type_prop`: the cell type proportion data
+* `cell_type_prop`: the cell type proportion data, each row is a cell cluster and each column is a sample.
+
+* `cluster_list` and `celltype_list`: the cluster list and corresponding celltype list to visualize.
+
+* `sample_metadata`: patient-level metadata, including several important variables.
+
+* `sample_name` and `pseudotime_name`: the variable name in `sample_metadata` that indicates the sample and pseudotime. The default setting of `sample_name` is "Patient" and `phenotype_name` is "Pseudotime". 
 
 ```{r}
 get_cell_prop_traj = function(cell_type_prop, cluster_list = NULL, celltype_list = NULL, 
