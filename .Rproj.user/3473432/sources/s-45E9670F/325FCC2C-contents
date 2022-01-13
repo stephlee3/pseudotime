@@ -1,0 +1,15 @@
+library(Seurat)
+library(tidyverse)
+
+seurat_obj = readRDS("../../data/seurat_harmony_obj.rds")
+meta = readRDS("/dcl02/hongkai/data/covid/data/old/161016/meta.rds")
+metadata = seurat_obj@meta.data
+
+patient_info = metadata %>%
+  select(Patient, Batch) %>%
+  unique() %>%
+  inner_join(meta %>% select(`Library Sample Code`, type), by = c('Patient' = 'Library Sample Code')) %>%
+  rename(Phenotype = type)
+
+print(str(patient_info))
+saveRDS(patient_info, "../../data/patient_info.rds")

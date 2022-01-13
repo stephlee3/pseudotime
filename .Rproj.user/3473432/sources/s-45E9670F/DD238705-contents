@@ -1,0 +1,300 @@
+---
+title: "A Tutorial of Sample-Pseudotime Aanalysis on COVID scRNA-seq Data"
+author: 
+- name: Runzhe Li
+  affiliation: Johns Hopkins University
+  email: rli51@jhmi.edu
+date: "`r Sys.Date()`"
+output: 
+  BiocStyle::html_document:
+    toc_float: true
+abstract: |
+  Description of your vignette
+vignette: |
+  %\VignetteIndexEntry{Vignette Title}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = F, warning = F)
+```
+
+# Load packages
+```{r}
+library(tidyverse)
+library(TSCAN)
+library(ggpubr)
+library(RColorBrewer)
+```
+
+# Load data
+* `pbpca`: the top 20 PCs of pseudo-bulk gene expression data
+
+* `cell_prop_pca`: the top 3 PCs of cell type proportion data
+
+* `patient_info`: the patient-level metadata
+
+* `sample_info_pb_center`: the patient-level metadata with predefined sample cluster info. 
+```{r}
+pbpca = readRDS("./data/pbpca.rds")
+cell_prop_pca = readRDS("./data/cell_prop_pca.rds")
+patient_info = readRDS("./data/patient_info.rds")
+sample_info_pb_center = readRDS("./data/sample_info_pb_center.rds")
+
+print(str(pbpca))
+print(str(cell_prop_pca))
+print(head(patient_info))
+print(head(sample_info_pb_center))
+```
+
+# Construct Sample Pseudotime
+
+To construct pseudotime, we provide the function `get_sample_pseudotime`:
+
+* `x`: the data matrix of features $\times$ samples, i.e. each row is a feature of gene expression or cell type proportion, each column is a patient sample.
+
+* `sample_metadata`: patient-level metadata, including several important variables.
+
+* `sample_name` and `phenotype_name`: the variable name in `sample_metadata` that indicates the sample and phenotype. The default setting of `sample_name` is "Patient" and `phenotype_name` is Phenotype. 
+
+* `method`: users now have two options, either using TSCAN for sample-level pseudotime construction or use CCA for optimal severity axis detection. 
+
+* `cluster = NULL, reduce = F, clusternum = 2, startcluster = 1`: parameters for TSCAN.
+
+* `phenotype_num`: the numerical value to indicate the phenotype severity. 
+
+
+```{r}
+get_sample_pseudotime = function(x, sample_metadata = NULL, 
+                                 sample_name = 'Patient', phenotype_name = 'Phenotype',
+                                 method = c('tscan','cca'),
+                                 cluster = NULL, reduce = F, clusternum = 2, startcluster = 1,
+                                 phenotype_num = NULL){
+  method = match.arg(method)
+  
+  ## match x and meta
+  match_idx = match(colnames(x), sample_metadata[,sample_name])
+  sample_metadata = sample_metadata[match_idx, ]
+  
+  ## tscan
+  if (method == 'tscan'){
+    sample_cluster = exprmclust(x, 
+                                reduce = reduce,
+                                cluster = cluster,
+                                clusternum = clusternum)
+    sample_metadata$cluster = sample_cluster$clusterid
+    
+    sample_order = TSCANorder(sample_cluster,
+                              startcluster = startcluster,
+                              orderonly = F,
+                              listbranch = F)
+    
+    sample_info = sample_metadata %>%
+      inner_join(sample_order, by = setNames("sample_name",sample_name)) %>%
+      arrange(Pseudotime)
+  }
+  if (method == 'cca'){
+    if (reduce) {
+      pc = prcomp(t(x), scale = T)$x[1:min(20, nrow(x))]
+    }
+    else {
+      pc = t(x)
+    }
+    res = cancor(pc,phenotype_num)
+    proj = (res$xcoef["PC1",1]*(pc[,"PC1"]-res$xcenter["PC1"]))+ (res$xcoef["PC2",1]*(pc[,"PC1"]-res$xcenter["PC2"]))
+    pseudotime = order(proj)
+    slope = res$xcoef["PC2",1]/res$xcoef["PC1",1]
+    print(paste("slope is", slope))
+    
+    sample_info = sample_metadata %>%
+      mutate(Pseudotime = pseudotime) %>%
+      arrange(Pseudotime)
+  }
+  
+  return(sample_info)
+}
+```
+
+# Examples
+We will walk through several examples...
+
+```{r, echo=F}
+theme_paper = function(){
+  theme_classic()+
+    theme(plot.title = element_text(hjust = 0.5)) 
+  
+} 
+
+Study.color = c(brewer.pal(5,'Set1'),brewer.pal(7,'Set2')); names(Study.color) = sort(unique(patient_info$Study))
+Phenotype.color = c("HD" = '#4DAF4A', "Mi" = '#377EB8' ,"Mod" ='orange', "Se" = '#E41A1C',
+                    "Rec" = 'grey', "Flu" = 'purple')
+
+create_pseudotime_plot = function(sample_info, title, cluster = F, opt_axis = F){
+  p1 =  sample_info %>%
+    ggplot(aes(x = PC1, y = PC2, color = Phenotype))+
+    geom_point(size = 3)+
+    coord_fixed(1)+
+    scale_colour_manual(values = Phenotype.color)+
+    guides(colour = guide_legend(nrow=2,byrow=TRUE)) + 
+    labs(color = "Severity") +
+    ggtitle(title)+
+    theme_paper()
+  
+  if(cluster){
+    p1 =  sample_info %>%
+    mutate(cluster = factor(cluster)) %>%
+    ggplot(aes(x = PC1, y = PC2, color = Phenotype, alpha = cluster))+
+    geom_point(size = 3)+
+    coord_fixed(1)+
+    scale_colour_manual(values = Phenotype.color)+
+    guides(colour = guide_legend(nrow=2,byrow=TRUE)) + 
+    labs(color = "Severity") +
+    ggtitle(title)+
+    theme_paper()
+  }
+  
+  if(opt_axis){
+    p1 =  sample_info %>%
+    mutate(cluster = factor(cluster)) %>%
+    ggplot(aes(x = PC1, y = PC2, color = Phenotype))+
+    geom_point(size = 3)+
+    geom_abline(intercept = 0, slope = -0.1542, linetype = 'dashed')+
+    coord_fixed(1)+
+    scale_colour_manual(values = Phenotype.color)+
+    guides(colour = guide_legend(nrow=2,byrow=TRUE)) + 
+    labs(color = "Severity") +
+    ggtitle(title)+
+    theme_paper()
+  }
+  
+  print(p1)
+}
+```
+
+
+## Example 1: pseudobulk pca + tscan + model-based clustering with 2 clusters
+```{r}
+sample_info1 = get_sample_pseudotime(x = t(pbpca[,1:2]), sample_metadata = patient_info, 
+                                    sample_name = 'Patient', phenotype_name = 'Phenotype',
+                                    method = 'tscan',
+                                    reduce = F, clusternum = 2, startcluster = 1)
+sample_info_pc1 = pbpca %>% 
+  as.data.frame() %>%
+  select(PC1:PC2) %>%
+  mutate(Patient = rownames(.)) %>%
+  inner_join(sample_info1 %>% select(Patient, Phenotype, cluster, Pseudotime), by = 'Patient')
+
+create_pseudotime_plot(sample_info_pc1, "Gene Expression", cluster = T)
+
+```
+
+## Example 2: pseudobulk pca + tscan + predefined 2 clusters connecting HD center and COVID center
+```{r}
+precluster = sample_info_pb_center$cluster; names(precluster) = sample_info_pb_center$Patient
+sample_info2 = get_sample_pseudotime(x = t(pbpca[,1:2]), sample_metadata = patient_info, 
+                                    sample_name = 'Patient', phenotype_name = 'Phenotype',
+                                    method = 'tscan', cluster = precluster,
+                                    reduce = F, startcluster = 1)
+sample_info_pc2 = pbpca %>% 
+  as.data.frame() %>%
+  select(PC1:PC2) %>%
+  mutate(Patient = rownames(.)) %>%
+  inner_join(sample_info2 %>% select(Patient, Phenotype, cluster, Pseudotime), by = 'Patient')
+
+create_pseudotime_plot(sample_info_pc2, "Gene Expression", cluster = T)
+```
+
+## Example 3: cell proportion pca + tscan + model-based clustering with 2 clusters
+```{r}
+sample_info3 = get_sample_pseudotime(x = t(cell_prop_pca[,1:2]), sample_metadata = patient_info, 
+                                    sample_name = 'Patient', phenotype_name = 'Phenotype',
+                                    method = 'tscan',
+                                    reduce = F, clusternum = 2, startcluster = 1)
+sample_info_pc3 = cell_prop_pca %>% 
+  as.data.frame() %>%
+  select(PC1:PC2) %>%
+  mutate(Patient = rownames(.)) %>%
+  inner_join(sample_info3 %>% select(Patient, Phenotype, cluster, Pseudotime), by = 'Patient')
+
+create_pseudotime_plot(sample_info_pc3, "Cell Proportion", cluster = T)
+```
+
+## Example 4: pseudobulk pca + cca 
+```{r}
+sev.level = patient_info[match(rownames(pbpca),patient_info$Patient),]$sev.level
+sample_info4 = get_sample_pseudotime(x = t(pbpca[,1:2]), sample_metadata = patient_info, 
+                                     sample_name = 'Patient', phenotype_name = 'Phenotype',
+                                     method = 'cca', phenotype_num = sev.level)
+sample_info_pc4 = pbpca %>% 
+  as.data.frame() %>%
+  select(PC1:PC2) %>%
+  mutate(Patient = rownames(.)) %>%
+  inner_join(sample_info4 %>% select(Patient, Phenotype, Pseudotime), by = 'Patient')
+
+create_pseudotime_plot(sample_info_pc4, "Gene Expression", cluster = F, opt_axis = T)
+
+```
+
+
+# Explore How Molecular Features Change Along Pseudotime
+## Cell type proportion
+We first load cell type proportion/count data and sample pseudotime results. 
+```{r}
+cell_type_prop = readRDS("./data/cell_type_prop.rds")
+celltype_info = readRDS("./data/celltype_info.rds")
+sample_info_opt = readRDS("./data/sample_info_pb_opt.rds")
+```
+
+
+Then we provide the following function `get_cell_prop_traj` to visualize the cell proportion change along pseudotime. 
+
+* `cell_type_prop`: the cell type proportion data
+
+```{r}
+get_cell_prop_traj = function(cell_type_prop, cluster_list = NULL, celltype_list = NULL, 
+                              sample_metadata = NULL, 
+                              sample_name = 'Patient', pseudotime_name = 'Pseudotime'){
+  celltype_label = paste0('c', cluster_list, '\n', celltype_list)
+  patient_order = sample_metadata[, sample_name]
+  cp = cell_type_prop[cluster_list, match(patient_order,colnames(cell_type_prop)),drop = F]
+  
+  cp_df = cp %>%
+    as.data.frame() %>%
+    mutate(celltype = celltype_label) %>%
+    gather(Patient, value, -celltype) %>%
+    inner_join(sample_metadata %>% select({{sample_name}}, {{pseudotime_name}}), by = setNames("Patient",sample_name))
+  
+  
+  p = cp_df %>%
+    mutate(celltype = factor(celltype, levels = celltype_label)) %>%
+    ggplot(aes(x = Pseudotime, y = value))+
+    geom_point()+ geom_smooth()+ 
+    facet_wrap(vars(celltype),scales = "free_y")+
+    ylab("Cell Type Proportion")+
+    theme_classic()
+  
+  return(p)
+    
+}
+```
+
+Now we explore some important cell clusters in our COVID data
+```{r}
+topclu = c(1,2,3,4,8,13,14,24,25); names(topclu) = paste0("c",topclu)
+topct = celltype_info$celltype[topclu]
+
+p1 = get_cell_prop_traj(cell_type_prop,cluster_list = topclu[1], celltype_list = topct[1],
+                       sample_metadata = sample_info_opt)
+p1
+p = get_cell_prop_traj(cell_type_prop,cluster_list = topclu, celltype_list = topct,
+                       sample_metadata = sample_info_opt)
+p
+```
+
+
+# Session Info {.unnumbered}
+
+```{r sessionInfo, echo=FALSE}
+sessionInfo()
+```

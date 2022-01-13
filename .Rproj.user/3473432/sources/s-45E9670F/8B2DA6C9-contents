@@ -1,0 +1,206 @@
+library(tidyverse)
+library(ggpubr)
+library(reshape2)
+library(gridExtra)
+library(ggrepel)
+
+cell_type_prop = readRDS("../../data/cell_type_prop.rds")
+patient_info = readRDS("../../data/patient_info.rds")
+cell_type_count = readRDS("../../data/cell_type_count.rds")
+
+patient_info$Phenotype = as.factor(patient_info$Phenotype)
+batch = patient_info$Batch
+
+
+clr_transform = function(X,pseudocount = 1){
+  # X: each row is a cluster, each column is a sample
+  X = as.data.frame.matrix(X)
+  X = X + pseudocount # pseudocount
+  ans = apply(X, 2, function(x){log(x/(exp(mean(log(x)))))})
+  return(ans)
+}
+
+remove_batch_effect = function(dat, batch, mod = NULL){
+  batchmod = model.matrix(~ -1 + batch)
+  nbatch = ncol(batchmod)
+  design = cbind(batchmod, mod)
+  
+  dat.adj = t(sapply(1:nrow(dat),function(g){
+    y = dat[g,]
+    beta.hat = solve(crossprod(design), crossprod(design, y))
+    gamma.hat = batchmod %*% beta.hat[1:nbatch,]
+    grand.mean = mean(gamma.hat)
+    gamma.hat = gamma.hat-grand.mean
+    y - gamma.hat
+  }))
+  dimnames(dat.adj) = dimnames(dat)
+  return(dat.adj)
+}
+
+
+detect_variable_clusters = function(dat, filter.method = 'var-mean', spread.pct = 0.5){
+  if (filter.method == 'none'){
+    topclu = 1: nrow(dat)
+  }
+  
+  if (filter.method == 'IQR'){
+    iqr = apply(dat,1, IQR)
+    topclu = which(rank(-iqr) <= spread.pct * nrow(dat))
+   
+  }
+  
+  if (filter.method == 'var-mean'){
+    v = apply(dat,1,var)
+    m = apply(dat,1,mean)
+    mod = loess(v~m)
+    topclu = which(resid(mod)>0)
+    var.adj = resid(mod)
+    
+  }
+  if (filter.method == 'gini'){
+    n = ncol(dat)
+    eg = expand.grid(i=1:n, j = 1:n)
+    gini.idx = sapply(1:nrow(dat),function(i){
+      x = dat[i,]
+      denom = 2*n^2*mean(x)
+      eg = eg %>% mutate(z = abs(x[i]-x[j]))
+      num = sum(eg$z)
+      num/denom
+    })
+    prop.max = apply(dat,1,max)
+    mod = loess(gini.idx ~prop.max)
+    gini.idx.adj = resid(mod)
+    topclu = which(resid(mod)>0)
+  
+  }
+  print(topclu)
+  return(topclu)
+}
+#cell_type_clr = clr_transform(cell_type_prop)
+#topclu = detect_variable_clusters(cell_type_clr, scree_plot = F, filter.method = 'var-mean')
+
+extract_top_PC = function(dat,scale = T, topPCs = 10){
+  if (is.null(dim(dat))){
+    if (scale) dat = scale(dat)
+    return(dat)
+  }
+  cell_prop_pca = prcomp(t(dat), scale. = scale)$x
+  topPCs = min(topPCs, ncol(cell_prop_pca))
+  cell_prop_pca = cell_prop_pca[,1:topPCs]
+  return(cell_prop_pca)
+}
+
+
+
+########### get distance matrix between patients 
+get_cell_prop_dist= function(cell_type_count, cell_type_prop, batch, batch_correction = F, filter.method = 'var-mean', spread.pct = 0.5, 
+                             pc.scale = T, dist.method = "clr", topPCs = 10){
+
+  if (dist.method == 'clr')
+    dat = clr_transform(cell_type_count)
+  else dat = cell_type_prop
+  
+  if (batch_correction)
+    dat = remove_batch_effect(dat, batch)
+  
+  topclu = detect_variable_clusters(dat, filter.method = filter.method, spread.pct = spread.pct)
+  dat = dat[topclu,]
+
+  
+  dat.pc = extract_top_PC(dat, scale = pc.scale, topPCs = topPCs)
+  dist_matrix = as.matrix(dist(dat.pc,diag = T))
+  lookup_table = melt(dist_matrix)
+  colnames(lookup_table)  = c("pt1","pt2","dist")
+  print(head(lookup_table))
+
+  ans = list(lookup_table = lookup_table, dist_matrix = dist_matrix, feature_PC = dat.pc) 
+  return(ans)
+}
+
+opt = expand.grid(batch_correction = c(T,F),
+                  filter.method = c('var-mean','gini', 'IQR', 'none'),
+                  spread.pct = c(0,0.25,0.5, 0.75),
+                  pc.scale = c(T,F), 
+                  dist.method = c("euclid","clr")) %>%
+  filter((filter.method == 'IQR' & spread.pct > 0) | (filter.method %in% c('var-mean','gini', 'none') & spread.pct == 0)) %>% 
+  mutate(label = paste0(filter.method,"_pct", spread.pct,"_batch",batch_correction, "_scale", pc.scale,"_", dist.method)) 
+  
+dist_list = lapply(1:nrow(opt),function(i){
+  print(opt[i,])
+  get_cell_prop_dist(cell_type_count = cell_type_count, cell_type_prop = cell_type_prop, batch = batch,
+                     batch_correction = opt$batch_correction[i], filter.method = opt$filter.method[i], spread.pct = opt$spread.pct[i], pc.scale = opt$pc.scale[i], 
+                     dist.method = opt$dist.method[i], topPCs = 10)
+})
+names(dist_list) = opt$label
+saveRDS(dist_list, "../../data/dist_ctp_list.rds")
+
+## vis
+dim_red_plot = function(dist_mat, dist.method = "euclid", 
+                        dat, vis.method = "MDS",
+                        group.variable = "Phenotype",
+                        label = 'Patient', point_size = 1, alpha = 1,
+                        repel = T){
+  if (vis.method == "MDS"){
+    mds <- dist_mat %>%         
+      cmdscale() %>%
+      as.data.frame() %>%
+      mutate(Patient = rownames(dist_mat)) %>% 
+      inner_join(patient_info, by = "Patient")
+    print(head(mds))
+    
+    colnames(mds)[1:2] <- c("MDS1", "MDS2")
+    # Plot MDS
+    p = ggscatter(mds, x = "MDS1", y = "MDS2", 
+                  label = label, color = group.variable,
+                  title = dist.method,
+                  size = point_size, alpha = alpha,#ellipse = TRUE,
+                  #ellipse.type = "convex",
+                  repel = repel)
+    return(p)
+  }
+  
+  if (vis.method == "PCA"){
+    pc <- dat[,c("PC1","PC2")]%>%         
+      as.data.frame() %>%
+      mutate(Patient = rownames(.)) %>% 
+      inner_join(patient_info, by = "Patient")
+    print(head(pc))
+    
+    colnames(pc)[1:2] <- c("PC1", "PC2")
+    # Plot PC
+    p = ggscatter(pc, x = "PC1", y = "PC2", 
+                  label = label, color = group.variable,
+                  title = dist.method,
+                  size = point_size, alpha = alpha, #ellipse = TRUE,
+                  #ellipse.type = "convex",
+                  repel = repel)
+    return(p)
+  }
+  
+}
+
+pdf("../../figure/pca_ctp_phenotype.pdf")
+lapply(1:length(dist_list), function(i){
+  if (!is.null(dim(dist_list[[i]]$feature_PC))){
+      try(dim_red_plot(dist_mat = dist_list[[i]]$dist_matrix, dat = dist_list[[i]]$feature_PC ,
+               vis.method = "PCA", dist.method = opt$label[i], label = "Phenotype", group.variable = "Phenotype", repel = F, point_size = 2, alpha = 0.6))
+  }
+})
+lapply(1:length(dist_list), function(i){
+  try(dim_red_plot(dist_mat = dist_list[[i]]$dist_matrix,vis.method = "MDS", dist.method = opt$label[i], label = "Phenotype", group.variable = "Phenotype", repel = F, point_size = 2, alpha = 0.6))
+})
+dev.off()
+
+
+pdf("../../figure/pca_ctp_batch.pdf")
+lapply(1:length(dist_list), function(i){
+  if (!is.null(dim(dist_list[[i]]$feature_PC))){
+      try(dim_red_plot(dist_mat = dist_list[[i]]$dist_matrix, dat = dist_list[[i]]$feature_PC ,
+               vis.method = "PCA", dist.method = opt$label[i], label = "Batch", group.variable = "Batch", repel = F, point_size = 2, alpha = 0.6))
+  }
+})
+lapply(1:length(dist_list), function(i){
+  try(dim_red_plot(dist_mat = dist_list[[i]]$dist_matrix,vis.method = "MDS", dist.method = opt$label[i], label = "Batch", group.variable = "Batch", repel = F, point_size = 2, alpha = 0.6))
+})
+dev.off()
+

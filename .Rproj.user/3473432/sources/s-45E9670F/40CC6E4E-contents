@@ -1,0 +1,101 @@
+library(tidyverse)
+library(reshape2)
+
+clr_transform = function(X,pseudocount = 1){
+  # X: each row is a cluster, each column is a sample
+  X = as.data.frame.matrix(X)
+  X = X + pseudocount # pseudocount
+  ans = apply(X, 2, function(x){log(x/(exp(mean(log(x)))))})
+  return(ans)
+}
+
+remove_batch_effect = function(dat, batch, mod = NULL){
+  batchmod = model.matrix(~ -1 + batch)
+  nbatch = ncol(batchmod)
+  design = cbind(batchmod, mod)
+  
+  dat.adj = t(sapply(1:nrow(dat),function(g){
+    y = dat[g,]
+    beta.hat = solve(crossprod(design), crossprod(design, y))
+    gamma.hat = batchmod %*% beta.hat[1:nbatch,]
+    grand.mean = mean(gamma.hat)
+    gamma.hat = gamma.hat-grand.mean
+    y - gamma.hat
+  }))
+  dimnames(dat.adj) = dimnames(dat)
+  return(dat.adj)
+}
+
+detect_variable_clusters = function(dat, filter.method = 'var-mean', feature.pct = 0.5){
+  if (filter.method == 'none'){
+    topclu = 1: nrow(dat)
+  }
+  
+  if (filter.method == 'IQR'){
+    iqr = apply(dat,1, IQR)
+    topclu = which(rank(-iqr)<= max(feature.pct * nrow(dat),1))
+   
+  }
+  
+  if (filter.method == 'var-mean'){
+    v = apply(dat,1,var)
+    m = apply(dat,1,mean)
+    mod = loess(v~m)
+    topclu = which(resid(mod)>0)
+    var.adj = resid(mod)
+    
+  }
+  if (filter.method == 'gini'){
+    n = ncol(dat)
+    gini.idx = sapply(1:nrow(dat),function(i){
+      x = dat[i,]
+      denom = 2*n^2*mean(x)
+      num = sum((4* (1:n) - 2*n - 2)* sort(x))
+      num/denom
+    })
+    prop.max = apply(dat,1,max)
+    mod = loess(gini.idx ~prop.max)
+    gini.idx.adj = resid(mod)
+    topclu = which(resid(mod)>0)
+  
+  }
+  return(topclu)
+}
+
+
+extract_top_PC = function(dat,scale = T, topPCs = 10){
+  if (is.null(dim(dat))){
+    if (scale) dat = scale(dat)
+    return(dat)
+  }
+  cell_prop_pca = prcomp(t(dat), scale. = scale)$x
+  topPCs = min(topPCs, ncol(cell_prop_pca))
+  cell_prop_pca = cell_prop_pca[,1:topPCs]
+  return(cell_prop_pca)
+}
+
+
+get_cell_prop_dist= function(cell_type_count, cell_type_prop, batch, batch_correction = F, filter.method = 'IQR', feature.pct = 0.5, 
+                             pc.scale = T, dist.method = "euclid", topPCs = 10){
+
+  if (dist.method == 'clr')
+    dat = clr_transform(cell_type_count)
+  else dat = cell_type_prop
+  
+  if (batch_correction)
+    dat = remove_batch_effect(dat, batch)
+  
+  topclu = detect_variable_clusters(dat, filter.method = filter.method, feature.pct = feature.pct)
+  print(topclu)
+  dat = dat[topclu,]
+
+  
+  dat.pc = extract_top_PC(dat, scale = pc.scale, topPCs = topPCs)
+  dist_matrix = as.matrix(dist(dat.pc,diag = T))
+  lookup_table = melt(dist_matrix)
+  colnames(lookup_table)  = c("pt1","pt2","dist")
+  print(head(lookup_table))
+
+  ans = list(lookup_table = lookup_table, dist_matrix = dist_matrix, feature_PC = dat.pc) 
+  return(ans)
+}

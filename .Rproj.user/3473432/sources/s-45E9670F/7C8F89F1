@@ -1,0 +1,20 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1641848593388.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "3656153314",
+    "id" : "7C8F89F1",
+    "lastKnownWriteTime" : 1641848179,
+    "last_content_update" : 1641848179,
+    "path" : "D:/2020-2021/research/hongkai/multi_sample/code/template/source/process/get_ctp.R",
+    "project_path" : null,
+    "properties" : {
+    },
+    "relative_order" : 3,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

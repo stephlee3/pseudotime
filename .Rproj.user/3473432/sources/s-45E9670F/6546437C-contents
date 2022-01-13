@@ -1,0 +1,55 @@
+library(Seurat)
+library(Matrix)
+library(tidyverse)
+
+
+
+seurat_obj = readRDS("../../data/seurat_harmony_obj.rds")
+s = seurat_obj@assays$RNA@counts
+clu = Idents(seurat_obj)
+pt = gsub('(.*):(.*)','\\1',names(clu))
+saveRDS(s,"../../data/rawcount.rds")
+
+# s: raw count
+# clu: cluster
+# colnames(clu) = patient:barcode
+get_cluster_pb = function(s, clu, pt){
+  if (is.factor(clu))
+    uc = levels(clu)
+  else uc = unique(clu) 
+  # uc <- paste0('c',sort(as.numeric(sub('c','',unique(clu)))))
+  m <- sapply(uc,function(sc) {
+    #print(sc)
+    tmp <- s[,which(clu==sc)]
+    p <- pt[which(clu == sc)]
+    #p <- sub('_.*','',colnames(tmp))
+    sapply(unique(p),function(sp) rowSums(tmp[,p==sp,drop=F]))
+  })
+  #print(str(m))
+  d <- lapply(m,function(i) {
+    rc <- colSums(i)/1e6
+    log2(t(t(i)/rc + 1))
+  })
+  names(d) = uc
+  return(d)
+}
+
+get_sample_pb = function(s, pt){
+  #p <- sub('_.*','',colnames(s))
+  m <- sapply(unique(pt),function(sp) rowSums(s[,pt ==sp,drop=F]))
+  #print(str(m))
+  rc <- colSums(m)/1e6
+  d <- log2(t(t(m)/rc + 1))
+  return(d)
+}
+
+## pseudobulk: list of length = # clusters
+## for each cluster: matrix(row: gene, col: patient)
+pb = get_cluster_pb(s,clu, pt)
+pb_base = get_sample_pb(s, pt)
+
+print(str(pb))
+print(str(pb_base))
+saveRDS(pb,"../../data/pseudo_bulk.rds")
+saveRDS(pb_base,"../../data/pseudo_bulk_base.rds")
+#saveRDS(seurat_obj, "../../data/seurat_obj.rds")

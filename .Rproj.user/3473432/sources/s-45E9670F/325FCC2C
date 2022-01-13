@@ -1,0 +1,20 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1641848597851.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "432493859",
+    "id" : "325FCC2C",
+    "lastKnownWriteTime" : 1641848179,
+    "last_content_update" : 1641848179,
+    "path" : "D:/2020-2021/research/hongkai/multi_sample/code/template/source/process/get_meta.R",
+    "project_path" : null,
+    "properties" : {
+    },
+    "relative_order" : 4,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

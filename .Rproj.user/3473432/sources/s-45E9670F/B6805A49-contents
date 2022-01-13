@@ -1,0 +1,99 @@
+library(Seurat)
+library(tidyverse)
+library(Matrix)
+
+
+############### pseudobulk ########################
+# s: raw count
+# clu: cluster
+# colnames(s) = patient:barcode
+get_cluster_pb = function(s, clu, pt){
+  if (is.factor(clu))
+    uc = levels(clu)
+  else uc = unique(clu) 
+  m <- sapply(uc,function(sc) {
+    tmp <- s[,which(clu==sc)]
+    p <- pt[which(clu == sc)]
+    sapply(unique(p),function(sp) rowSums(tmp[,p==sp,drop=F]))
+  })
+  d <- lapply(m,function(i) {
+    rc <- colSums(i)/1e6
+    log2(t(t(i)/rc + 1))
+  })
+  names(d) = uc
+  return(d)
+}
+
+get_sample_pb = function(s, pt){
+  m <- sapply(unique(pt),function(sp) rowSums(s[,pt ==sp,drop=F]))
+  rc <- colSums(m)/1e6
+  d <- log2(t(t(m)/rc + 1))
+  return(d)
+}
+
+
+get_ctp = function(clu, pt){
+  cell_label = data.frame(Cluster = clu,
+                          Patient = pt)
+ 
+  cell_type_count = table(cell_label$Cluster, cell_label$Patient) %>% unlist()
+  cell_type_prop = apply(cell_type_count,2,function(x) x/sum(x))
+  
+  ans = list(count = cell_type_count,
+             prop = cell_type_prop)
+  return(ans)
+}
+
+process_data = function(seurat_obj, covid_data = F){
+  s = seurat_obj@assays$RNA@counts
+  metadata = seurat_obj@meta.data
+  umap = seurat_obj@reductions$umap@cell.embeddings
+  
+  clu = Idents(seurat_obj)
+  pt = gsub('(.*):(.*)','\\1',names(clu))
+  
+  if (covid_data){
+    meta = readRDS("/dcl02/hongkai/data/covid/data/old/161016/meta.rds")
+    patient_info = metadata %>%
+      select(Patient, Batch) %>%
+      unique() %>%
+      inner_join(meta %>% select(`Library Sample Code`, type), by = c('Patient' = 'Library Sample Code')) %>%
+      rename(Phenotype = type)
+  } else{
+    patient_info = metadata %>%
+      select(Patient, Phenotype, contains("Batch")) %>%
+      unique()
+    print(str(patient_info))
+  }
+  
+  
+ 
+  
+  umap = data.frame(umap) %>%
+    mutate(Patient = gsub('(.*):(.*)','\\1',rownames(.)))
+  #pc = seurat_obj@reductions$pca@cell.embeddings
+  pc = seurat_obj %>% RunPCA() 
+  pc = pc@reductions$pca@cell.embeddings
+  
+  
+
+  ctp = get_ctp(clu, pt)
+  cell_type_count = ctp$count
+  cell_type_prop = ctp$prop
+  
+  cluster_pb = get_cluster_pb(s,clu, pt)
+  sample_pb = get_sample_pb(s, pt)
+  
+  dat = list(
+    cluster = clu,
+    patient = pt,
+    patient_info = patient_info,
+    umap = umap,
+    pc = pc,
+    cell_type_count = cell_type_count, 
+    cell_type_prop = cell_type_prop,
+    cluster_pb = cluster_pb,
+    sample_pb = sample_pb
+  )
+  return(dat)
+}
