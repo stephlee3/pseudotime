@@ -26,6 +26,8 @@ library(tidyverse)
 library(TSCAN)
 library(ggpubr)
 library(RColorBrewer)
+library(mgcv)
+library(ComplexHeatmap)
 ```
 
 # Load data
@@ -295,6 +297,148 @@ p1 = get_cell_prop_traj(cell_type_prop,cluster_list = topclu[1], celltype_list =
 p1
 p = get_cell_prop_traj(cell_type_prop,cluster_list = topclu, celltype_list = topct,
                        sample_metadata = sample_info_opt)
+p
+```
+
+## Gene Expression
+Now we will demonstrate how to detect differential genes along pseudotime, separately for each cell cluster, using the function `run_pseudo_diff_gene`
+
+* `x`: the pseudobulk gene expression data, each row is a gene:cluster feature and each column is a sample.
+
+* `cluster`: the cell cluster. 
+
+* `sample_metadata`: patient-level metadata, including several important variables.
+
+* `sample_name` and `pseudotime_name`: the variable name in `sample_metadata` that indicates the sample and pseudotime. The default setting of `sample_name` is "Patient" and `pseudotime_name` is "Pseudotime". 
+
+* `plot`: logical. Indicate whether to plot the heatmap or not. 
+
+```{r}
+run_pseudo_diff_gene = function(x, sample_metadata = NULL, cluster = 1,
+                         sample_name = 'Patient', pseudotime_name = 'Pseudotime',
+                         plot = F
+                         ){
+  #print(cluster)
+  ptime = sample_metadata[,pseudotime_name]
+  sample_metadata = sample_metadata[order(ptime),]
+  
+  fn = rownames(x)
+  gn = gsub('(.*):(.*)','\\1',fn)
+  cn = gsub('(.*):(.*)','\\2',fn)
+  
+  xc = x[which(cn == paste0("c",cluster)),]
+  xc_reorder = xc[,match(sample_metadata$Patient,colnames(x))]
+  
+  res = lapply(1:nrow(xc_reorder), function(i){
+    model = mgcv::gam(xc_reorder[i,]~s(c(1:ncol(xc_reorder)),k=3))
+    smooth = model$fitted.values
+    pval = pchisq(model$null.deviance - model$deviance, model$df.null - model$df.residual,lower.tail = F) 
+    list(smooth = smooth, pval = pval)
+  })
+  pval = sapply(res, function(i) i$pval)
+  xsmooth = lapply(res, function(i) i$smooth) %>% do.call(rbind, .)
+  rownames(xsmooth) = rownames(xc_reorder)
+  
+  
+  fdr = p.adjust(pval, method = 'fdr')
+  result = data.frame(gene = gsub('(.*):(.*)','\\1',rownames(xc_reorder)), pval = pval, fdr = fdr) %>%
+    mutate(cluster = cluster,
+           signif = (fdr < 0.05)) %>%
+    arrange(fdr)
+  print(result)
+  sig = result %>% filter(signif) %>% pull(gene) 
+  sig = paste0(sig,':c',cluster)
+  
+  xsig = xsmooth[rownames(xsmooth) %in% sig,]
+  xsig = t(apply(xsig, 1, scale))
+  rownames(xsig) = gsub('(.*):(.*)','\\1',rownames(xsig))
+  colnames(xsig) = colnames(xsmooth)
+  
+  if (plot){
+    Study.color = readRDS("./data/study.rds")
+    Phenotype.color = readRDS("./data/severity.rds")
+    patient_annot = HeatmapAnnotation(Severity = sample_metadata$Phenotype,
+                                      Study = sample_metadata$Study,
+                                      #Sex = sample_info$Sex,
+                                      #Age = sample_info$Age,
+                                      col = list(Severity = Phenotype.color,
+                                                 Study = Study.color),
+                                      #Sex = sex.color,
+                                      #Age = col_fun),
+                                      show_legend = F, simple_anno_size = unit(10,"mm"),
+                                      annotation_name_gp = gpar(fontsize = 25)
+    )
+    p = Heatmap(xsig, name = "Expression", 
+                show_row_dend = F, cluster_rows = T,
+                column_title = "Pseudotime -->", column_title_side = "bottom",
+                top_annotation = patient_annot, 
+                cluster_columns = F, column_dend_reorder=F,
+                row_names_gp = gpar(fontsize = 10), row_names_centered = T,
+                column_names_gp = gpar(fontsize = 10),
+                column_title_gp = gpar(fontsize = 40),
+                show_heatmap_legend = F,
+                show_column_names = F,
+                heatmap_legend_param = list(
+                  title_gp = gpar(fontsize = 25),
+                  labels_gp = gpar(fontsize = 25),
+                  legend_height = unit(8, "cm"),
+                  grid_width = unit(1,"cm")
+                ))
+    print(p)
+  }
+  return(result)
+}
+```
+
+
+```{r}
+pb_example = readRDS("./data/pb_example_c1.rds")
+common_pt = intersect(colnames(pb_example), sample_info_opt$Patient)
+sample_info = sample_info_opt %>%
+  filter(Patient %in% common_pt)
+
+DEG_result = run_pseudo_diff_gene(x = pb_example, sample_metadata = sample_info, cluster = 1,
+                           plot = T)
+print(DEG_result)
+```
+
+We can also use the function `get_gene_expr_traj` to explore how the gene expression levels in certain clusters change over pseudotime. 
+
+
+* `x`: the pseudobulk gene expression data, each row is a gene:cluster feature and each column is a sample.
+
+* `gene_list`: the gene list to visualize. 
+
+* `cluster`: the cell cluster. 
+
+* `sample_metadata`: patient-level metadata, including several important variables.
+
+* ``pseudotime_name`: the variable name in `sample_metadata` that indicates the pseudotime. The default setting of `pseudotime_name` is "Pseudotime". 
+
+
+```{r}
+get_gene_expr_traj = function(x, gene_list, cluster, sample_metadata, 
+                              pseudotime_name = 'Pseudotime'){
+  ptime = sample_metadata[,pseudotime_name]
+  sample_metadata = sample_metadata[order(ptime),]
+  xg = x[paste0(gene_list,":c",cluster),,drop = F]
+  colnames(xg) = 1:ncol(xg)
+  df = xg %>%
+    as.data.frame() %>%
+    mutate(gene=rownames(.)) %>%
+    pivot_longer(!gene, names_to = 'Pseudotime', values_to = 'Expression') %>%
+    mutate(Pseudotime = as.numeric(Pseudotime))
+  str(df)
+  p = df%>%
+    ggplot(aes(x = Pseudotime, y = Expression))+
+    geom_point()+ geom_smooth()+
+    facet_wrap(vars(gene), scales = "free_y") + theme_classic()
+  return(p)
+}
+p = get_gene_expr_traj(x = pb_example, 
+                       gene_list = c('GZMA','RAP1GAP2','FXYD7','KLRB1','RPS27','EEF1A1'), 
+                       cluster = 1, 
+                       sample_metadata = sample_info)
 p
 ```
 
