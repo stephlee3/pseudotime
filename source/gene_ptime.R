@@ -4,6 +4,8 @@ library(circlize)
 library(RColorBrewer)
 library(mgcv)
 library(parallel)
+library(org.Hs.eg.db)
+
 
 sample_info_opt = readRDS("/dcl02/hongkai/data/rli/covid/wrapup/data/sample_info_pb_opt.rds")
 pb_raw = readRDS("/dcl02/hongkai/data/rli/covid/wrapup/data/pb_no_scale.rds")
@@ -12,12 +14,33 @@ common_pt = intersect(colnames(pb_raw), sample_info_opt$Patient)
 sample_info = sample_info_opt %>%
   filter(Patient %in% common_pt)
 
+saveRDS(sample_info, "/dcl02/hongkai/data/rli/covid/wrapup/data/sample_info.rds")
+
 pb_raw = pb_raw[,colnames(pb_raw) %in% common_pt]
 pb_reorder = pb_raw[,match(common_pt, colnames(pb_raw))]
 
-example_genes = c('GZMA','RAP1GAP2','FXYD7','KLRB1','RPS27','EEF1A1')
-pb_example = pb_reorder[paste0(example_genes,':c1'),]
-saveRDS(pb_example, "/dcl02/hongkai/data/rli/covid/wrapup/data/pb_example_c1.rds")
+#example_genes = c('GZMA','RAP1GAP2','FXYD7','KLRB1','RPS27','EEF1A1')
+#pb_example = pb_reorder[paste0(example_genes,':c1'),]
+#saveRDS(pb_example, "/dcl02/hongkai/data/rli/covid/wrapup/data/pb_example_c1.rds")
+
+## helper functions
+find_cluster_num = function(wss, nums, method = 'perpendicular'){
+  method = match.arg(method)
+  n = length(nums)
+  
+  if (method == 'perpendicular'){
+    x1 = nums[1]; xn = nums[n];
+    y1 = wss[1]; yn = wss[n];
+    d = sapply(1:n, function(k){
+      x = nums[k]; y = wss[k];
+      a = yn-y1; b = x1-xn; c = y1*xn-x1*yn
+      abs(a*x+b*y+c)/sqrt(a^2+b^2)
+    })
+    print(d)
+    cluster_num = nums[which.max(d)]
+  }
+  return(cluster_num)
+}
 
 
 get_gene_expr_traj = function(x, gene_list, cluster, sample_metadata, 
@@ -38,14 +61,16 @@ get_gene_expr_traj = function(x, gene_list, cluster, sample_metadata,
     facet_wrap(vars(gene)) + theme_classic()
   return(p)
 }
-p = get_gene_expr_traj(x = pb_reorder, 
-                       gene_list = c('ATXN1','ADGRG1','C18orf25','CCDC9','ACVR2A'), 
-                       cluster = 1, 
-                       sample_metadata = sample_info)
+#p = get_gene_expr_traj(x = pb_reorder, 
+#                       gene_list = c('ATXN1','ADGRG1','C18orf25','CCDC9','ACVR2A'), 
+#                       cluster = 1, 
+#                       sample_metadata = sample_info)
 #print(p)
 
 run_pseudo_diff_gene = function(x, sample_metadata = NULL, cluster = 1,
-                         sample_name = 'Patient', pseudotime_name = 'Pseudotime',
+                         sample_name = 'Patient', pseudotime_name = 'Pseudotime', 
+                         cv_quantile_cutoff = 0.5, 
+                         gene_clustering = T, cluster_num = c(1:10), sel_method = 'perpendicular',
                          save = F, csv_path = './data', plot = F
                          ){
   print(cluster)
@@ -59,6 +84,11 @@ run_pseudo_diff_gene = function(x, sample_metadata = NULL, cluster = 1,
   xc = x[which(cn == paste0("c",cluster)),]
   xc_reorder = xc[,match(sample_metadata$Patient,colnames(x))]
   
+  cv = apply(xc_reorder, 1, function(x) sd(x)/mean(x))
+  top_genes = which(cv > quantile(cv, cv_quantile_cutoff))
+  top_cv = cv[top_genes]
+  xc_reorder = xc_reorder[top_genes,]
+  
   res = lapply(1:nrow(xc_reorder), function(i){
     model = mgcv::gam(xc_reorder[i,]~s(c(1:ncol(xc_reorder)),k=3))
     smooth = model$fitted.values
@@ -70,11 +100,19 @@ run_pseudo_diff_gene = function(x, sample_metadata = NULL, cluster = 1,
   rownames(xsmooth) = rownames(xc_reorder)
   print(str(xsmooth))
   
+  
   fdr = p.adjust(pval, method = 'fdr')
-  result = data.frame(gene = gsub('(.*):(.*)','\\1',rownames(xc_reorder)), pval = pval, fdr = fdr) %>%
-    mutate(cluster = cluster,
+  result = data.frame(gene = gsub('(.*):(.*)','\\1',rownames(xc_reorder)), pval = pval, fdr = fdr, cv = top_cv) %>%
+    mutate(cell_cluster = cluster,
            signif = (fdr < 0.05)) %>%
-    arrange(fdr)
+    arrange(fdr, cv)
+  
+  gene_symbols = result$gene
+  gene_ids = AnnotationDbi::select(org.Hs.eg.db, keys = gene_symbols, keytype = "SYMBOL", columns= c("ENSEMBL", "ENTREZID", "SYMBOL"))
+  result = result %>%
+    left_join(gene_ids, by = c('gene' = 'SYMBOL'))
+  
+  
   
   sig = result %>% filter(signif) %>% pull(gene) 
   sig = paste0(sig,':c',cluster)
@@ -85,9 +123,26 @@ run_pseudo_diff_gene = function(x, sample_metadata = NULL, cluster = 1,
   colnames(xsig) = colnames(xsmooth)
   
   
+  if (gene_clustering){
+    if (length(cluster_num) == 1){
+      k = cluster_num
+    } else{
+      wss = sapply(cluster_num, function(k){
+        kmeans(xsig, centers = k)$tot.withinss
+      })
+      k = find_cluster_num(wss, cluster_num, method = sel_method)
+    }
+   gene_clusters = data.frame(gene = rownames(xsig),
+                              gene_cluster = kmeans(xsig, centers = k)$cluster)
+   result = result %>%
+     left_join(gene_clusters, by = 'gene')
+  }
+  
+  print(head(result))
+  
   if (save){
-    dir.create(file.path(csv_path, "diff"))
-    write_csv(result, file.path(csv_path, "diff", paste0("c", cluster,".csv")))
+    dir.create(file.path(csv_path, "difftest"))
+    write_csv(result, file.path(csv_path, "difftest", paste0("c", cluster,".csv")))
   }
   if (plot){
     Study.color = readRDS("/dcl02/hongkai/data/covid/data/current/palette/study.rds")
@@ -103,12 +158,14 @@ run_pseudo_diff_gene = function(x, sample_metadata = NULL, cluster = 1,
                                       show_legend = F, simple_anno_size = unit(10,"mm"),
                                       annotation_name_gp = gpar(fontsize = 25)
     )
+    row_clusters = result$gene_cluster[match(rownames(xsig),result$gene)]
     p = Heatmap(xsig, name = "Expression", 
                 show_row_dend = F, cluster_rows = T,
                 column_title = "Pseudotime -->", column_title_side = "bottom",
                 top_annotation = patient_annot, 
                 cluster_columns = F, column_dend_reorder=F,
-                row_names_gp = gpar(fontsize = 1), row_names_centered = T,
+                row_split = row_clusters, row_gap = unit(5, "mm"),
+                row_names_gp = gpar(fontsize = 3), row_names_centered = T,
                 column_names_gp = gpar(fontsize = 10),
                 column_title_gp = gpar(fontsize = 40),
                 show_heatmap_legend = F,
@@ -120,8 +177,35 @@ run_pseudo_diff_gene = function(x, sample_metadata = NULL, cluster = 1,
                   grid_width = unit(1,"cm")
                 ),
                 use_raster = T, raster_device = "tiff")
-    pdf(file.path(csv_path, "diff", paste0("c", cluster,".pdf")), width = 16, height = 80)
-    print(p)
+    xsig_raw = xc_reorder[match(paste0(rownames(xsig),":c",cluster), rownames(xc_reorder)),]
+    xsig_raw = t(apply(xsig_raw, 1, scale))
+    rownames(xsig_raw) = gsub('(.*):(.*)','\\1',rownames(xsig_raw))
+    colnames(xsig_raw) = colnames(xsig)
+    
+    p_raw = Heatmap(xsig_raw, name = "Expression", 
+                show_row_dend = F, cluster_rows = F,
+                column_title = "Pseudotime -->", column_title_side = "bottom",
+                top_annotation = patient_annot, 
+                cluster_columns = F, column_dend_reorder=F,
+                row_split = row_clusters, row_gap = unit(5, "mm"),
+                row_names_gp = gpar(fontsize = 3), row_names_centered = T,
+                column_names_gp = gpar(fontsize = 10),
+                column_title_gp = gpar(fontsize = 40),
+                show_heatmap_legend = F,
+                show_column_names = F,
+                heatmap_legend_param = list(
+                  title_gp = gpar(fontsize = 25),
+                  labels_gp = gpar(fontsize = 25),
+                  legend_height = unit(8, "cm"),
+                  grid_width = unit(1,"cm")
+                ),
+                use_raster = T, raster_device = "tiff")
+
+
+    
+    
+    pdf(file.path(csv_path, "difftest", paste0("c", cluster,".pdf")), width = 32, height = 80)
+    draw(p + p_raw)
     dev.off()
   }
   return(xsig)
@@ -133,7 +217,7 @@ diff_result = mclapply(topclu, run_pseudo_diff_gene, mc.cores = 9,
                      sample_name = 'Patient', pseudotime_name = 'Pseudotime',
                      save = T, csv_path = '/dcl02/hongkai/data/rli/covid/wrapup/data', plot = T)
 
-saveRDS(diff_result, "/dcl02/hongkai/data/rli/covid/wrapup/data/diff_smooth.rds")
+#saveRDS(diff_result, "/dcl02/hongkai/data/rli/covid/wrapup/data/diff_smooth.rds")
 
 
 ## DO NOT RUN ## 

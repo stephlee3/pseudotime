@@ -1,0 +1,267 @@
+---
+title: "A Tutorial of Sample-Pseudotime Aanalysis on COVID scRNA-seq Data"
+author: 
+- name: Runzhe Li
+  affiliation: Johns Hopkins University
+  email: rli51@jhmi.edu
+date: "`r Sys.Date()`"
+output: 
+  BiocStyle::html_document:
+    toc_float: true
+abstract: |
+  Description of your vignette
+vignette: |
+  %\VignetteIndexEntry{Vignette Title}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = F, warning = F)
+```
+
+# Load packages
+```{r}
+library(tidyverse)
+library(TreeCorTreat)
+library(ggpubr)
+library(RColorBrewer)
+library(ggrepel)
+```
+
+# Read R code
+```{r}
+source("./source/demo/util.R")
+source("./source/demo/core.R")
+source("./source/demo/core_clean.R")
+```
+
+# Load data
+The input for our pipeline is listed below:
+
+* `leaves_info`: The hierarchical tree structure to reveal the cell type lineage relationship.
+
+* `cell_meta`: The cell meta data frame, which includes the following column names: `celltype`, `barcode`, `sample`
+
+* `sample_meta`: The sample meta data frame, which includes the following column names:
+`sample`,`study`, `severity`, `batch` and some other clinical variables of interest. 
+
+* `raw_count`: The raw gene expression matrix, where each row is a gene and each column is a cell. 
+
+
+```{r}
+leaves_info = readRDS("./data/demo/leaves_info.rds")
+cell_meta = readRDS("./data/demo/cell_meta.rds")
+sample_meta = readRDS("./data/demo/sample_meta.rds")
+raw_count = readRDS("./data/demo/raw_count.rds")
+
+head(leaves_info)
+head(cell_meta)
+head(sample_meta)
+str(raw_count)
+```
+
+For demo purpose, we randomly select 5 mild and 5 moderate samples from Su's study.
+
+
+# Tree Structure
+```{r}
+s <- paste0('@All(', 
+            '@T(',paste0('T_c',c(1:12), collapse = ','),'),',
+            '@Mono(',paste0('Mono_c',c(13:23), collapse = ','),'),',
+            '@B(',paste0('B_c',c(24:28), collapse = ','),'),',
+            '@Neutrophil(',paste0('Neutrophil_c',c(29:30), collapse = ','),'),',
+            '@Megakaryocyte(',paste0('Megakaryocyte_c',c(31), collapse = ','),'))')
+
+hierarchy_list <- extract_hrchy_string(s,'@') # tree is plotted in bottom-up fashion.
+```
+
+This is an example of how to construct hierarchical tree structure based on the string input. We identify five major immune cell types, including T cells, Monocytes, B cells, Neurtrophil and Megakaryocte. Within each large immune cell type, we can identify several cell subclusters. 
+
+
+# Run Pseudotime
+We provide a unified and easy-to-use function to run pseduotime analysis, which only requires the input of raw gene expression data, cell-level metadata, sample-level metadata, and hierarichial tree structure. The output will consist of list of pseudo bulk gene expression data, list of cell type proportion data, and sample pseudotime (automatic selected).
+ 
+Some highlights of the key arguments in the function: users have the option to select features to construct pseudotime, which includes `expr` (gene expression), `prop` (cell proportion), and `expr_and_prop` (both gene expression and cell proportion). The pseudotime construction methods can be classified into two broad categories, i.e. semi-supervised approach `cca` and unsupervised approaches such as `tscan` and `mst`. 
+Users also can specify the clustering methods from `mclust`, `kmeans` and `louvain`. The `eval_method` argument indicates the metrics used to automatically select the optimal pseudotime construction.
+
+```{r}
+ptime_result = runPseudotime(raw_count = raw_count,
+                             cell_meta = cell_meta, 
+                             sample_meta = sample_meta,
+                             leaves_info = leaves_info,
+                             features = 'expr_and_prop', 
+                             batch = NULL, 
+                             pb_filter_pct = 0.9, 
+                             pb_HVG = T, 
+                             pb_qnorm = T, 
+                             pb_batch_correction = F, 
+                             pb_parallel = F,
+                             ctp_clr = F, 
+                             ctp_adj_cov = NULL, 
+                             ctp_batch_correction = F, 
+                             sample_name = 'sample', 
+                             severity_name = 'severity', 
+                             severity_num_name = 'sev.level',
+                             ptime_method = 'cca', 
+                             clsutermethod = 'louvain', 
+                             cluster_id = NULL, 
+                             reduce = F, 
+                             clusternum = 2, 
+                             startcluster = 1, 
+                             near_nbr_num = 3, 
+                             modelNames = 'VVV',
+                             pc_scale = T,
+                             eval_method = 'corr')
+print(str(ptime_result))
+```
+
+# Run DEG
+
+We provide the fucntion `runPseudoDEG` to identify the differentially expressed genes over pseduotime based on the prespecified tree structure. The DEG results are provided at each internal tree node and they are readily available for downstream TreeCorTreat analysis. 
+
+```{r}
+sample_meta_ptime = ptime_result$sample_meta_ptime$sample_info
+pb.ls = ptime_result$pb.ls
+pb.ls.node = pb.ls$node
+
+
+deg_result = runPseudoDEG(sample_meta = sample_meta_ptime, pb.ls = pb.ls,
+                          leaves_info = leaves_info, phenotype_name = 'severity',
+                          pseudotime_name = 'pseudotime')
+deg_table = deg_result$tab
+deg_summary = deg_result$num_DEG
+print(deg_summary)
+```
+
+# Sample-Level Low-Dimensional Representation
+
+In this section, we demonstrate the low-dimensional representation of each sample, and use canonical correlation based methods to identify the optimal axis that has the largest correlation with severity level. The optimal axis reveals the disease progression from mild to moderate status. 
+
+
+```{r}
+severity.color = readRDS("./data/demo/severity.rds")
+study.color = readRDS("./data/demo/study.rds")
+
+create_pseudotime_plot = function(sample_info, rd, title, slope = NULL){
+  
+  sample_info = rd %>% 
+    as.data.frame() %>%
+    mutate(sample = rownames(.)) %>%
+    inner_join(sample_info, by = 'sample') %>%
+    filter(study == 'Su')
+
+  p1 = ggplot(aes(x = PC1, y = PC2, color = severity, label = sample), data= sample_info)+
+    geom_point(size = 5)+
+    scale_colour_manual(values = severity.color)+
+    geom_text_repel()+
+    geom_abline(slope = slope, intercept = 0, linetype = 'dashed', col = 'red', size = 3)+
+    guides(colour = guide_legend(nrow=2,byrow=TRUE)) + 
+    labs(color = "Severity") +
+    ggtitle(title)+
+    theme_classic()
+  
+  return(p1)
+}
+
+ptime.ls = ptime_result$ptime.ls
+for (i in 1:length(ptime.ls)){
+  print(i)
+  p1 = create_pseudotime_plot(sample_info = ptime.ls[[i]]$ptime$sample_info, rd = ptime.ls[[i]]$rd,
+                              title = paste0("CCA", names(ptime.ls)[i]),
+                              slope = ptime.ls[[i]]$ptime$slope)
+  print(p1)
+  
+}
+
+```
+
+# Cell Proportion Dynamic Trajectory
+
+Now we are going to show how the cell proportion changes along the pseudotime by fitting a smooth curve. 
+
+```{r}
+get_cell_prop_traj = function(cell_type_prop, 
+                              sample_metadata = NULL,
+                              sample_name = 'sample', pseudotime_name = 'pseudotime'){
+  
+  rn = rownames(cell_type_prop)
+  celltype_list = gsub('(.*)_(.*)','\\1', rn)
+  cluster_list = gsub('(.*)_(.*)','\\2', rn)
+  celltype_label = paste0(cluster_list, '\n', celltype_list)
+  patient_order = sample_metadata[, sample_name]
+  
+  cp = cell_type_prop[, match(patient_order,colnames(cell_type_prop)),drop = F]
+  
+  cp_df = cp %>%
+    as.data.frame() %>%
+    mutate(celltype = celltype_label) %>%
+    gather(!!sample_name, value, -celltype) %>%
+    inner_join(sample_metadata %>% dplyr::select({{sample_name}}, {{pseudotime_name}}), by = sample_name)
+  
+  str(cp_df)
+  
+  p = cp_df %>%
+    mutate(celltype = factor(celltype, levels = celltype_label)) %>%
+    ggplot(aes(x = get(pseudotime_name), y = value))+
+    geom_point()+ geom_smooth()+ 
+    facet_wrap(vars(celltype),scales = "free_y")+
+    ylab("Cell Type Proportion")+
+    theme_classic()
+  
+  return(p)
+    
+}
+
+ctp = get_ctp(clu = cell_meta$celltype, pt = cell_meta$sample)
+p1 = get_cell_prop_traj(cell_type_prop = ctp, 
+                        sample_metadata = sample_meta_ptime)
+p1
+
+```
+
+
+# Gene Expression Dynamic Trajectory
+
+Now we are going to show how the expression levels of specific genes in specific clusters change over the pseudotime. 
+
+
+```{r}
+get_gene_expr_traj = function(x, gene_list, cluster, sample_metadata, 
+                              pseudotime_name = 'pseudotime',
+                              sample_name = 'sample'){
+  ptime = sample_metadata[,pseudotime_name]
+  sample_metadata = sample_metadata[order(ptime),]
+  match_id = match(sample_metadata[, sample_name], colnames(x))
+  x = x[gene_list, match_id , drop = F]
+  colnames(x) = 1:ncol(x)
+  
+ 
+  df = x %>%
+    as.data.frame() %>%
+    mutate(gene=rownames(.)) %>%
+    pivot_longer(!gene, names_to = 'Pseudotime', values_to = 'Expression') %>%
+    mutate(Pseudotime = as.numeric(Pseudotime))
+
+  p = df%>%
+    ggplot(aes(x = Pseudotime, y = Expression))+
+    geom_point()+ geom_smooth()+
+    facet_wrap(vars(gene), scales = "free_y") + 
+    ggtitle(cluster)+
+    theme_classic()
+  return(p)
+}
+p = get_gene_expr_traj(x = pb.ls.node[['Mono']], 
+                       gene_list = c("HLA-DQA2","XIST", "LYPD2", "MTRNR2L8", "UTY", "RPS4Y1"), #head(deg_table[['Mono']]$gene), 
+                       cluster = 'Mono', 
+                       sample_metadata = sample_meta_ptime)
+p
+
+```
+
+
+# Session Info {.unnumbered}
+
+```{r sessionInfo, echo=FALSE}
+sessionInfo()
+```
